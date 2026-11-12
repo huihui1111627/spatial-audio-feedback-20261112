@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["vitest/globals", "audioworklet", "node"]
+  },
+  "include": ["src", "test"]
+}

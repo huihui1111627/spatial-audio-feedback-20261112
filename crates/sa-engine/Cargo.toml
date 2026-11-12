@@ -1,0 +1,12 @@
+[package]
+name = "sa-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sa-core = { path = "../sa-core" }
+sa-dsp = { path = "../sa-dsp" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,3 @@
+/* 生产托管（Cloudflare Pages 风格）的跨源隔离响应头。 */
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp

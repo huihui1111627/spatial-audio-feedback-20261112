@@ -1,0 +1,16 @@
+[package]
+name = "sa-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sa-core = { path = "../sa-core" }
+sa-engine = { path = "../sa-engine" }
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

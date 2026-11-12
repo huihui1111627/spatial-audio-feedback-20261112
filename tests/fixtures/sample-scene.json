@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "app_version": "0.0.0",
+  "room": {
+    "dimensions": { "x": 8.0, "y": 3.0, "z": 5.0 },
+    "walls": [
+      { "material_id": "plaster", "absorption": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15], "scattering": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] },
+      { "material_id": "plaster", "absorption": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15], "scattering": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] },
+      { "material_id": "plaster", "absorption": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15], "scattering": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] },
+      { "material_id": "plaster", "absorption": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15], "scattering": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] },
+      { "material_id": "plaster", "absorption": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15], "scattering": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] },
+      { "material_id": "plaster", "absorption": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15], "scattering": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] }
+    ],
+    "doors": [{ "wall": 0, "open_fraction": 0.5 }]
+  },
+  "sources": [
+    {
+      "id": "src_1",
+      "name": "测试声源",
+      "asset_hash": "",
+      "position": { "x": 1.0, "y": 1.5, "z": -2.0 },
+      "gain": { "keys": [{ "t": 0.0, "value": 0.8, "easing": "linear" }] }
+    }
+  ],
+  "listener": {
+    "position": { "x": 0.0, "y": 1.6, "z": 0.0 },
+    "forward": { "x": 0.0, "y": 0.0, "z": -1.0 },
+    "up": { "x": 0.0, "y": 1.0, "z": 0.0 }
+  },
+  "assets": []
+}
