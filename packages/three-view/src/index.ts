@@ -1,5 +1,2 @@
-/**
- * three.js 三维视口（M1 落地）：房间/声源/轨迹可视化与拾取。
- * 几何仅服务编辑，声学求交以 Rust sa-geo 为唯一权威。
- */
-export {};
+export { Viewport, type ViewportProps } from "./Viewport.js";
+export { ViewportRuntime, type ViewportCallbacks } from "./runtime.js";

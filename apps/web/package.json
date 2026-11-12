@@ -10,9 +10,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@spatial/assets": "workspace:*",
     "@spatial/audio-client": "workspace:*",
     "@spatial/project": "workspace:*",
     "@spatial/scene-model": "workspace:*",
+    "@spatial/state": "workspace:*",
+    "@spatial/three-view": "workspace:*",
+    "@spatial/ui": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

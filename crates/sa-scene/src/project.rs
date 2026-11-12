@@ -124,8 +124,8 @@ pub struct SceneProject {
 }
 
 /// 测试与校验模块共用的合法工程样例。
-#[cfg(test)]
-pub(crate) mod tests_fn {
+#[cfg(any(test, feature = "test-utils"))]
+pub mod tests_fn {
     use super::*;
 
     pub fn valid_project() -> SceneProject {

@@ -11,7 +11,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
-    "rust:test": "cargo test --workspace --exclude sa-wasm && cargo test --target wasm32-unknown-unknown -p sa-wasm",
+    "rust:test": "cargo test --workspace --exclude sa-wasm && wasm-pack test --node crates/sa-wasm",
     "rust:lint": "cargo clippy --workspace --all-targets -- -D warnings",
     "wasm:build": "wasm-pack build crates/sa-wasm --target web --out-dir ../../packages/audio-client/src/wasm --dev",
     "e2e:smoke": "node tests/e2e/smoke.mjs"

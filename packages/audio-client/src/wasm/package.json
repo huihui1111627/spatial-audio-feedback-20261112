@@ -1,0 +1,16 @@
+{
+  "name": "sa-wasm",
+  "type": "module",
+  "version": "0.0.0",
+  "license": "MIT",
+  "files": [
+    "sa_wasm_bg.wasm",
+    "sa_wasm.js",
+    "sa_wasm.d.ts"
+  ],
+  "main": "sa_wasm.js",
+  "types": "sa_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

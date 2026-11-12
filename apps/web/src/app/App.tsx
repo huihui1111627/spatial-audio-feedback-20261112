@@ -1,197 +1,341 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  detectCapabilities,
-  RenderSessionClient,
-  type ClientHeartbeat,
-  type RuntimeCapabilities,
-} from "@spatial/audio-client";
-import { buildSampleScene } from "@spatial/scene-model";
+import { useCallback, useEffect, useRef } from "react";
+import { RenderSessionClient } from "@spatial/audio-client";
 import { packProject, unpackProject } from "@spatial/project";
+import { decodeToMono48k, getAsset, putAsset, sha256Hex } from "@spatial/assets";
+import {
+  addDoor,
+  addSource,
+  bindEngine,
+  loadProject,
+  markSaved,
+  newProject,
+  redo,
+  registerAsset,
+  removeDoor,
+  removeSource,
+  renameSource,
+  selectSource,
+  setDoorOpen,
+  setRoomDimensions,
+  setSourceAsset,
+  setSourceGain,
+  setSourcePosition,
+  setWallMaterial,
+  undo,
+  useDocumentStore,
+  usePlaybackStore,
+} from "@spatial/state";
+import { materialFromPreset, validateSceneSemantics } from "@spatial/scene-model";
+import { Viewport } from "@spatial/three-view";
+import { Inspector, Outliner, TransportBar } from "@spatial/ui";
 
-type EngineStatus = "idle" | "compiling" | "ready" | "failed";
-
-const CAP_LABELS: Array<[keyof RuntimeCapabilities, string]> = [
-  ["crossOriginIsolated", "跨源隔离（SAB 前提）"],
-  ["sharedArrayBuffer", "SharedArrayBuffer"],
-  ["opfs", "OPFS 素材存储"],
-  ["opfsSyncAccessHandle", "OPFS 同步句柄"],
-  ["audioWorklet", "AudioWorklet"],
-  ["webCodecsAudioDecoder", "WebCodecs 音频解码"],
-  ["webCodecsAudioEncoder", "WebCodecs 音频编码"],
-  ["wasmSimd", "WebAssembly 能力"],
-];
+// e2e 与调试用的只读挂钩。
+declare global {
+  interface Window {
+    __sasGetProject?: () => unknown;
+  }
+}
 
 export function App() {
-  const [caps, setCaps] = useState<RuntimeCapabilities | null>(null);
-  const [status, setStatus] = useState<EngineStatus>("idle");
-  const [heartbeat, setHeartbeat] = useState<ClientHeartbeat>({
-    blocks: 0,
-    samples: 0,
-  });
-  const [gain, setGain] = useState(0.3);
-  const [error, setError] = useState<string | null>(null);
-  const [projectCheck, setProjectCheck] = useState<string | null>(null);
+  const project = useDocumentStore((s) => s.project);
+  const selectedSourceId = useDocumentStore((s) => s.selectedSourceId);
+  const dirty = useDocumentStore((s) => s.dirty);
+  const status = usePlaybackStore((s) => s.status);
+  const playing = usePlaybackStore((s) => s.playing);
+  const samples = usePlaybackStore((s) => s.samples);
+  const masterGain = usePlaybackStore((s) => s.masterGain);
+
   const clientRef = useRef<RenderSessionClient | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const openFileRef = useRef<HTMLInputElement>(null);
+  const importAudioRef = useRef<HTMLInputElement>(null);
+
+  // 引擎就绪后绑定文档同步；心跳轮询走带时钟。
+  const ensureEngine = useCallback(async (): Promise<RenderSessionClient> => {
+    if (clientRef.current) return clientRef.current;
+    const pb = usePlaybackStore.getState();
+    pb.setStatus("compiling");
+    const ctx = new AudioContext({ sampleRate: 48000 });
+    audioCtxRef.current = ctx;
+    // 自动播放策略：首次启动在用户手势里，显式 resume 兜底。
+    await ctx.resume();
+    const client = new RenderSessionClient();
+    await client.start({ audioContext: ctx });
+    clientRef.current = client;
+    // 先装配素材再同步场景，Wav 播放器才能立刻出声的。
+    const { project: p } = useDocumentStore.getState();
+    for (const ref of p.assets) {
+      const bytes = await getAsset(ref.hash);
+      if (bytes) {
+        const pcm = await decodeToMono48k(
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+        );
+        client.loadAsset(ref.hash, pcm);
+      }
+    }
+    bindEngine(client);
+    client.setGain(usePlaybackStore.getState().masterGain);
+    usePlaybackStore.getState().setStatus("ready");
+    return client;
+  }, []);
 
   useEffect(() => {
-    setCaps(detectCapabilities());
+    const timer = setInterval(() => {
+      const client = clientRef.current;
+      if (!client) return;
+      void client.requestHeartbeat().then((h) => {
+        usePlaybackStore.getState().setSamples(h.samples);
+      });
+    }, 500);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    window.__sasGetProject = () => useDocumentStore.getState().project;
     return () => {
-      void clientRef.current?.stop();
-      clientRef.current = null;
-      audioCtxRef.current = null;
+      delete window.__sasGetProject;
     };
   }, []);
 
-  async function startEngine() {
-    setError(null);
-    setStatus("compiling");
+  // 卸载时停引擎。
+  useEffect(() => {
+    return () => {
+      void clientRef.current?.stop();
+      clientRef.current = null;
+    };
+  }, []);
+
+  // 撤销重做快捷键。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      if (e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const togglePlay = useCallback(async () => {
+    const pb = usePlaybackStore.getState();
     try {
-      const ctx = new AudioContext();
-      audioCtxRef.current = ctx;
-      const client = new RenderSessionClient();
-      clientRef.current = client;
-      client.onHeartbeat(setHeartbeat);
-      await client.start({ audioContext: ctx });
-      client.setGain(gain);
-      setStatus("ready");
+      const client = await ensureEngine();
+      await audioCtxRef.current?.resume();
+      const next = !pb.playing;
+      client.setPlaying(next);
+      pb.setPlaying(next);
     } catch (err) {
-      setStatus("failed");
-      setError(err instanceof Error ? err.message : String(err));
+      usePlaybackStore.getState().setStatus("failed");
+      console.error("引擎启动失败", err);
     }
-  }
+  }, [ensureEngine]);
 
-  async function stopEngine() {
-    await clientRef.current?.stop();
-    clientRef.current = null;
-    audioCtxRef.current = null;
-    setStatus("idle");
-    setHeartbeat({ blocks: 0, samples: 0 });
-  }
+  const changeMasterGain = useCallback((gain: number) => {
+    usePlaybackStore.getState().setMasterGain(gain);
+    clientRef.current?.setGain(gain);
+  }, []);
 
-  function changeGain(value: number) {
-    setGain(value);
-    clientRef.current?.setGain(value);
-  }
+  const saveProject = useCallback(async () => {
+    const { project: p } = useDocumentStore.getState();
+    const files: Array<{ path: string; data: Uint8Array }> = [];
+    for (const ref of p.assets) {
+      const data = await getAsset(ref.hash);
+      if (data) files.push({ path: `assets/${ref.hash}`, data });
+    }
+    const bytes = packProject({ scene: p, files });
+    const blob = new Blob([bytes as unknown as BlobPart], {
+      type: "application/x-sasproj+zip",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "scene.sasproj";
+    a.click();
+    URL.revokeObjectURL(url);
+    markSaved();
+  }, []);
 
-  async function refreshHeartbeat() {
+  const openProjectFile = useCallback(async (file: File) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const unpacked = unpackProject(bytes);
+    const semanticError = validateSceneSemantics(unpacked.scene);
+    if (semanticError) {
+      alert(`工程校验失败：${semanticError}`);
+      return;
+    }
+    // 素材回写 OPFS 并装配到引擎。
+    for (const [path, data] of unpacked.files) {
+      if (!path.startsWith("assets/")) continue;
+      const hash = path.slice("assets/".length);
+      await putAsset(hash, data);
+      const client = clientRef.current;
+      if (client) {
+        const pcm = await decodeToMono48k(
+          data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer,
+        );
+        client.loadAsset(hash, pcm);
+      }
+    }
+    loadProject(unpacked.scene);
+  }, []);
+
+  const importAudio = useCallback(async (file: File) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const hash = await sha256Hex(bytes);
+    await putAsset(hash, bytes);
+    registerAsset({
+      hash,
+      name: file.name,
+      mime: file.type || "application/octet-stream",
+      byte_length: bytes.byteLength,
+    });
     const client = clientRef.current;
-    if (!client) return;
-    setHeartbeat(await client.requestHeartbeat());
-  }
-
-  function selfTestProject() {
-    try {
-      const bytes = packProject({ scene: buildSampleScene() });
-      const unpacked = unpackProject(bytes);
-      setProjectCheck(
-        `打包解包通过：${bytes.byteLength} 字节，声源 ${unpacked.scene.sources.length} 个，CRC 校验正常`,
-      );
-    } catch (err) {
-      setProjectCheck(`失败：${err instanceof Error ? err.message : String(err)}`);
+    if (client) {
+      client.loadAsset(hash, await decodeToMono48k(bytes.buffer as ArrayBuffer));
     }
-  }
+    const { selectedSourceId: sel } = useDocumentStore.getState();
+    if (sel) {
+      setSourceAsset(sel, hash);
+    } else {
+      const id = addSource();
+      setSourceAsset(id, hash);
+    }
+  }, []);
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-8 space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold">spatial-audio-studio</h1>
-        <p className="text-neutral-400 text-sm mt-1">
-          M0 自检：环境能力、worklet 内 wasm 心跳、工程文件打包解包
-        </p>
-      </header>
-
-      <section className="space-y-2">
-        <h2 className="text-lg font-medium">运行环境</h2>
-        <div className="grid grid-cols-2 gap-2 max-w-2xl">
-          {caps &&
-            CAP_LABELS.map(([key, label]) => (
-              <div
-                key={key}
-                className="flex items-center justify-between rounded border border-neutral-800 px-3 py-2 text-sm"
-              >
-                <span className="text-neutral-300">{label}</span>
-                <span className={caps[key] ? "text-emerald-400" : "text-amber-400"}>
-                  {caps[key] ? "可用" : "不可用"}
-                </span>
-              </div>
-            ))}
-        </div>
-        {caps && !caps.crossOriginIsolated && (
-          <p className="text-amber-400 text-sm">
-            当前页面没有跨源隔离，SAB ringbuf 通道将降级为消息队列（功能不裁剪）。
-          </p>
-        )}
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium">音频内核（wasm in AudioWorklet）</h2>
-        <div className="flex items-center gap-3">
-          {status === "idle" || status === "failed" ? (
-            <button
-              type="button"
-              onClick={startEngine}
-              className="rounded bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500"
-            >
-              启动引擎
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={stopEngine}
-              className="rounded bg-neutral-700 px-4 py-2 text-sm font-medium hover:bg-neutral-600"
-            >
-              停止
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={refreshHeartbeat}
-            disabled={status !== "ready"}
-            className="rounded border border-neutral-700 px-4 py-2 text-sm disabled:opacity-40"
-          >
-            查询心跳
-          </button>
-          <span className="text-sm text-neutral-400">
-            状态：<span className="text-neutral-200">{status}</span>
-          </span>
-        </div>
-
-        <label className="flex max-w-md items-center gap-3 text-sm">
-          增益（内核等功率平滑）
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={gain}
-            onChange={(e) => changeGain(Number(e.target.value))}
-            className="flex-1"
-          />
-          <span className="w-12 text-right tabular-nums">{gain.toFixed(2)}</span>
-        </label>
-
-        <div className="rounded border border-neutral-800 bg-neutral-900 px-4 py-3 text-sm tabular-nums">
-          已处理块数：{heartbeat.blocks} ｜ 已处理样本：{heartbeat.samples}
-        </div>
-        {error && <p className="text-red-400 text-sm">{error}</p>}
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium">工程文件（.sasproj）</h2>
+    <div className="flex h-screen flex-col bg-neutral-950 text-neutral-100">
+      <header className="flex items-center gap-2 border-b border-neutral-800 px-3 py-2">
+        <h1 className="mr-4 text-sm font-semibold">Spatial Audio Studio</h1>
         <button
           type="button"
-          onClick={selfTestProject}
-          className="rounded border border-neutral-700 px-4 py-2 text-sm hover:bg-neutral-800"
+          onClick={() => newProject()}
+          className="rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
         >
-          浏览器内打包 → 解包自检
+          新建
         </button>
-        {projectCheck && (
-          <p className="rounded border border-neutral-800 bg-neutral-900 px-4 py-3 text-sm text-neutral-300">
-            {projectCheck}
-          </p>
-        )}
-      </section>
+        <button
+          type="button"
+          onClick={() => openFileRef.current?.click()}
+          className="rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
+        >
+          打开…
+        </button>
+        <button
+          type="button"
+          onClick={() => void saveProject()}
+          className="rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
+        >
+          保存{dirty ? " *" : ""}
+        </button>
+        <button
+          type="button"
+          onClick={() => importAudioRef.current?.click()}
+          className="rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
+        >
+          导入音频…
+        </button>
+        <span className="mx-2 h-4 w-px bg-neutral-800" />
+        <button
+          type="button"
+          onClick={() => undo()}
+          className="rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
+        >
+          撤销
+        </button>
+        <button
+          type="button"
+          onClick={() => redo()}
+          className="rounded border border-neutral-700 px-2 py-1 text-xs hover:bg-neutral-800"
+        >
+          重做
+        </button>
+        <input
+          ref={openFileRef}
+          type="file"
+          accept=".sasproj"
+          data-testid="open-project-input"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void openProjectFile(f);
+            e.target.value = "";
+          }}
+        />
+        <input
+          ref={importAudioRef}
+          type="file"
+          accept="audio/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void importAudio(f);
+            e.target.value = "";
+          }}
+        />
+      </header>
+
+      <div className="border-b border-neutral-800">
+        <TransportBar
+          status={status}
+          playing={playing}
+          timeSeconds={samples / 48000}
+          masterGain={masterGain}
+          onTogglePlay={() => void togglePlay()}
+          onMasterGain={changeMasterGain}
+        />
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        <aside className="w-56 border-r border-neutral-800">
+          <Outliner
+            project={project}
+            selectedSourceId={selectedSourceId}
+            onSelect={selectSource}
+            onAddSource={() => addSource()}
+            onRemoveSource={removeSource}
+          />
+        </aside>
+        <main className="min-w-0 flex-1">
+          <Viewport
+            project={project}
+            selectedSourceId={selectedSourceId}
+            onSelect={selectSource}
+            onMoveSource={setSourcePosition}
+            // 拖拽中的位置预览不进文档（避免撤销历史刷屏），
+            // 网格位置由 gizmo 直接驱动，拖拽结束一次性提交。
+            onPreviewSource={() => {}}
+            onDragStateChange={() => {}}
+          />
+        </main>
+        <aside className="w-72 border-l border-neutral-800">
+          <Inspector
+            project={project}
+            selectedSourceId={selectedSourceId}
+            onRenameSource={renameSource}
+            onSetSourceGain={setSourceGain}
+            onSetSourcePosition={setSourcePosition}
+            onSetRoomDimensions={setRoomDimensions}
+            onSetWallPreset={(wall, preset) =>
+              setWallMaterial(wall, materialFromPreset(preset))
+            }
+            onSetWallBand={(wall, band, absorption) => {
+              const w = project.room.walls[wall];
+              if (!w) return;
+              const bands = [...w.absorption] as typeof w.absorption;
+              bands[band] = absorption;
+              setWallMaterial(wall, { ...w, absorption: bands });
+            }}
+            onSetDoorOpen={setDoorOpen}
+            onAddDoor={addDoor}
+            onRemoveDoor={removeDoor}
+          />
+        </aside>
+      </div>
     </div>
   );
 }

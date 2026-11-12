@@ -4,8 +4,11 @@
 //! [`RenderSession::process_block`] 出来。实时模式由 AudioWorklet 量子驱动，
 //! 离线模式（M5）由外部样本时钟驱动同一条路径。
 
+pub mod graph;
+pub mod scene_apply;
 pub mod session;
 pub mod state;
 
+pub use scene_apply::eval_autom_param;
 pub use session::RenderSession;
-pub use state::SessionState;
+pub use state::{PlayerState, SessionState, SourceState, STATE_VERSION};

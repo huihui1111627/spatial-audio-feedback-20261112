@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@spatial/scene-model": "workspace:*",
+    "zundo": "^2.2.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

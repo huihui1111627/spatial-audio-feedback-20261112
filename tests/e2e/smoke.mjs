@@ -1,9 +1,9 @@
 /**
- * M0 端到端冒烟：真实 Chromium 里验证
- * 1) 跨源隔离响应头生效、能力面板渲染
- * 2) worklet 内 wasm EngineSession 启动并持续处理音频块（心跳增长）
- * 3) 增益调节链路无异常
- * 4) .sasproj 浏览器内打包/解包自检通过
+ * M1 端到端冒烟：真实 Chromium 里验证
+ * 1) 跨源隔离响应头生效、编辑器三栏渲染
+ * 2) 播放启动 worklet 内 wasm 引擎，走带时钟持续推进
+ * 3) 添加声源、撤销/重做链路无异常
+ * 4) .sasproj 保存（下载）→ 修改 → 打开后场景回到保存时状态
  *
  * 直接用 playwright-core 写独立脚本，复用本机已缓存的浏览器，不重复下载。
  */
@@ -36,11 +36,16 @@ function startDevServer() {
   });
 }
 
-async function waitForText(page, text, timeoutMs = 10_000) {
+async function waitForText(page, text, timeoutMs = 15_000) {
   await page.getByText(text, { exact: false }).first().waitFor({ timeout: timeoutMs });
 }
 
+async function sourceCount(page) {
+  return page.evaluate(() => window.__sasGetProject?.().sources.length ?? -1);
+}
+
 async function main() {
+  const step = (msg) => console.error(`[smoke ${(performance.now() / 1000).toFixed(1)}s] ${msg}`);
   if (!EXTERNAL_SERVER) {
     devServer = await startDevServer();
     // 给 vite 一点端口就绪缓冲。
@@ -48,7 +53,8 @@ async function main() {
   }
 
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
+  // 小视口：headless 用 swiftshader 软件渲染 WebGL，画布越小主线程越不被拖垮。
+  const context = await browser.newContext({ viewport: { width: 480, height: 360 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (err) => errors.push(`pageerror: ${err.message}`));
@@ -56,49 +62,82 @@ async function main() {
     if (msg.type() === "error") errors.push(`console: ${msg.text()}`);
   });
 
+  step("goto");
   await page.goto(BASE_URL, { waitUntil: "networkidle" });
 
-  // 1. 跨源隔离与能力面板
+  // 1. 跨源隔离与编辑器骨架
   if (!(await page.evaluate(() => globalThis.crossOriginIsolated))) {
     throw new Error("跨源隔离未生效：COOP/COEP 响应头配置有问题");
   }
-  await waitForText(page, "AudioWorklet");
-  await waitForText(page, "可用");
+  await waitForText(page, "Spatial Audio Studio");
+  await waitForText(page, "测试声源");
+  step("骨架渲染完成");
 
-  // 2. 启动 worklet 内 wasm 引擎
-  await page.getByRole("button", { name: "启动引擎" }).click();
-  await waitForText(page, "状态：ready", 15_000);
-
-  // 音频块持续累加（心跳）
-  await page.getByRole("button", { name: "查询心跳" }).click();
+  // 2. 播放 → 引擎就绪 → 走带时钟推进
+  await page.getByRole("button", { name: "播放" }).click();
+  step("已点击播放");
+  await waitForText(page, "引擎：就绪");
+  step("引擎就绪");
   await page.waitForFunction(
     () => {
-      const el = document.querySelector(".tabular-nums");
-      return el && /已处理块数：[1-9]/.test(el.textContent ?? "");
+      const el = document.querySelector('[data-testid="transport-time"]');
+      return el && el.textContent !== "00:00.0";
     },
-    { timeout: 10_000 },
+    { timeout: 15_000 },
   );
-  const firstHeartbeat = await page.locator(".tabular-nums").first().innerText();
+  step("走带时钟推进");
 
-  // 3. 调增益并再查一次心跳，确认链路持续工作
-  await page.locator('input[type="range"]').fill("0.7");
-  await page.getByRole("button", { name: "查询心跳" }).click();
-  await page.waitForTimeout(300);
-  const secondHeartbeat = await page.locator(".tabular-nums").first().innerText();
-  if (secondHeartbeat === firstHeartbeat) {
-    throw new Error(`心跳没有增长：${firstHeartbeat}`);
+  // 3. 添加声源 → 撤销 → 重做
+  if ((await sourceCount(page)) !== 1) {
+    throw new Error("初始场景应有 1 个声源");
   }
+  await page.getByRole("button", { name: "添加声源" }).click();
+  await waitForText(page, "声源 2");
+  if ((await sourceCount(page)) !== 2) {
+    throw new Error("添加声源后应有 2 个声源");
+  }
+  step("添加声源");
+  await page.getByRole("button", { name: "撤销" }).click();
+  await page.waitForFunction(
+    () => window.__sasGetProject?.().sources.length === 1,
+    { timeout: 5_000 },
+  );
+  await page.getByRole("button", { name: "重做" }).click();
+  await page.waitForFunction(
+    () => window.__sasGetProject?.().sources.length === 2,
+    { timeout: 5_000 },
+  );
+  step("撤销/重做");
 
-  // 4. 工程文件打包解包自检
-  await page.getByRole("button", { name: "浏览器内打包 → 解包自检" }).click();
-  await waitForText(page, "打包解包通过");
+  // 4. 保存 → 再改 → 打开，场景必须回到保存时的样子
+  const downloadPromise = page.waitForEvent("download", { timeout: 10_000 });
+  await page.getByRole("button", { name: "保存", exact: false }).click();
+  const download = await downloadPromise;
+  const savedPath = await download.path();
+  if (!savedPath) throw new Error("保存工程没有产生下载文件");
+  step("保存工程");
+
+  await page.getByRole("button", { name: "添加声源" }).click();
+  await page.waitForFunction(
+    () => window.__sasGetProject?.().sources.length === 3,
+    { timeout: 5_000 },
+  );
+
+  await page.locator('[data-testid="open-project-input"]').setInputFiles(savedPath);
+  await page.waitForFunction(
+    () => window.__sasGetProject?.().sources.length === 2,
+    { timeout: 5_000 },
+  );
+  step("打开工程回到保存状态");
 
   if (errors.length > 0) {
     throw new Error(`浏览器侧报错：\n${errors.join("\n")}`);
   }
 
   await browser.close();
-  console.log("✓ M0 冒烟通过：跨源隔离、worklet wasm 心跳、增益链路、工程自检全部正常");
+  console.log(
+    "✓ M1 冒烟通过：跨源隔离、引擎播放、走带时钟、增删/撤销/重做、工程保存打开全部正常",
+  );
 }
 
 main()

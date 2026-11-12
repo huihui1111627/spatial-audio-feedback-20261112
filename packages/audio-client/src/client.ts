@@ -1,8 +1,9 @@
 /**
  * RenderSessionClient：主线程接触音频内核的唯一门面。
  *
- * M0 链路：主线程 fetch+compile wasm → 把 Module 转移给 worklet →
- * worklet 内 initWasm(module) 实例化 EngineSession。
+ * 链路：主线程 fetch wasm 字节 → 转移给 worklet → worklet 内
+ * initSync 同步编译实例化。注意不能传编译好的 WebAssembly.Module：
+ * 它无法结构化克隆进 AudioWorklet（消息会被静默丢弃）。
  * 后续参数通道（M2 起）在这里切 SAB ringbuf，调用方接口不变。
  */
 import type { EngineSession } from "./wasm/sa_wasm.js";
@@ -27,6 +28,7 @@ export class RenderSessionClient {
   private node: AudioWorkletNode | null = null;
   private context: AudioContext | null = null;
   private status: ClientStatus = "idle";
+  private initError: string | null = null;
   private heartbeatListeners = new Set<(h: ClientHeartbeat) => void>();
 
   get currentStatus(): ClientStatus {
@@ -38,8 +40,11 @@ export class RenderSessionClient {
     this.status = "compiling";
     this.context = audioContext;
 
-    const [module] = await Promise.all([
-      WebAssembly.compileStreaming(fetch(wasmUrl)),
+    const [wasmBytes] = await Promise.all([
+      fetch(wasmUrl).then((r) => {
+        if (!r.ok) throw new Error(`wasm 下载失败：HTTP ${r.status}`);
+        return r.arrayBuffer();
+      }),
       audioContext.audioWorklet.addModule(workletUrl),
     ]);
 
@@ -51,20 +56,28 @@ export class RenderSessionClient {
     node.port.onmessage = (event: MessageEvent) => {
       if (event.data?.kind === "ready") {
         this.status = "ready";
+      } else if (event.data?.kind === "initError") {
+        this.status = "failed";
+        this.initError = String(event.data.error ?? "未知初始化错误");
       } else if (event.data?.kind === "heartbeat") {
         const hb: ClientHeartbeat = {
           blocks: event.data.blocks as number,
-          samples: event.data.samples as number,
+          // samples_processed 是 u64，wasm 侧出来是 BigInt，这里归一成 number。
+          samples: Number(event.data.samples),
         };
         this.heartbeatListeners.forEach((fn) => fn(hb));
       }
     };
     node.connect(audioContext.destination);
-    node.port.postMessage({
-      kind: "init",
-      module,
-      sampleRate: audioContext.sampleRate,
-    });
+    // wasm 字节走转移（transfer），主线程不再持有副本。
+    node.port.postMessage(
+      {
+        kind: "init",
+        wasmBytes,
+        sampleRate: audioContext.sampleRate,
+      },
+      [wasmBytes],
+    );
     this.node = node;
 
     // 等待 worklet 回 ready，避免调用方在 DSP 未就绪时调参。
@@ -81,7 +94,7 @@ export class RenderSessionClient {
         } else if (this.status === "failed") {
           clearInterval(check);
           clearTimeout(timer);
-          reject(new Error("worklet wasm 初始化失败"));
+          reject(new Error(this.initError ?? "worklet wasm 初始化失败"));
         }
       }, 16);
     });
@@ -90,6 +103,26 @@ export class RenderSessionClient {
   /** 增益目标值；内核侧 Smoother 做等功率过渡，调用频率不限。 */
   setGain(gain: number): void {
     this.node?.port.postMessage({ kind: "setGain", gain });
+  }
+
+  /** 走带启停。 */
+  setPlaying(playing: boolean): void {
+    this.node?.port.postMessage({ kind: "setPlaying", playing });
+  }
+
+  /** 应用场景快照（SceneProject 的 JSON 串），内核做 diff 与平滑过渡。 */
+  applyScene(sceneJson: string): void {
+    this.node?.port.postMessage({ kind: "applyScene", scene: sceneJson });
+  }
+
+  /** 细粒度参数写入（master/gain、source/{id}/gain …）。 */
+  setParam(path: string, value: number): void {
+    this.node?.port.postMessage({ kind: "setParam", path, value });
+  }
+
+  /** 装配素材 PCM（48k 单声道），底层缓冲零拷贝转移给 worklet。 */
+  loadAsset(hash: string, pcm: Float32Array): void {
+    this.node?.port.postMessage({ kind: "loadAsset", hash, pcm }, [pcm.buffer]);
   }
 
   requestHeartbeat(): Promise<ClientHeartbeat> {
@@ -104,7 +137,7 @@ export class RenderSessionClient {
           node.port.removeEventListener("message", handler);
           resolve({
             blocks: event.data.blocks as number,
-            samples: event.data.samples as number,
+            samples: Number(event.data.samples),
           });
         }
       };

@@ -1,2 +1,3 @@
-/** tailwind4 共享组件（inspector/outliner/timeline，M1 起逐步落地）。 */
-export {};
+export { Outliner, type OutlinerProps } from "./Outliner.js";
+export { Inspector, type InspectorProps } from "./Inspector.js";
+export { TransportBar, type TransportBarProps } from "./TransportBar.js";

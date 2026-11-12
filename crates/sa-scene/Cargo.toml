@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# 暴露 tests_fn 样例给 workspace 内其他 crate 的测试用。
+test-utils = []
+
 [dependencies]
 sa-core = { path = "../sa-core" }
 serde = { workspace = true }
